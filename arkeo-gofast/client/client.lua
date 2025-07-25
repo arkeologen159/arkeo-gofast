@@ -1,306 +1,168 @@
+-- Fully optimized and refactored client.lua for GoFast
 local isOnMission = false
-local missionVehicle = nil
-local deliveryBlip = nil
+local missionVehicle, deliveryBlip, gofastPed = nil, nil, nil
+local T = require("locales." .. Config.Language)
 
-local language = Config.Language
-local T = require("locales." .. language)
+local function notify(title, desc, type)
+    lib.notify({ title = title, description = desc, type = type, duration = 5000, position = Config.OxNotifyPosition })
+end
 
-print(T.welcome)
-
-function CreateGoFastPed()
-    local model = Config.PedModel
+local function waitForModel(model)
     RequestModel(model)
     while not HasModelLoaded(model) do Wait(0) end
+end
 
-    local pedCoords = Config.PedLocation
-    local ped = CreatePed(4, model, pedCoords.x, pedCoords.y, pedCoords.z - 1, pedCoords.w, false, true)
-
-    FreezeEntityPosition(ped, true)
-    SetEntityInvincible(ped, true)
-    SetBlockingOfNonTemporaryEvents(ped, true)
-
-    exports.ox_target:addLocalEntity(ped, {
+local function showInputDialog(drug, maxAmount, minAmount)
+    return lib.inputDialog(string.format('%s %s', T.quantity_label, drug.label), {
         {
-            name = 'start_gofast',
-            icon = 'fas fa-car',
-            label = T.start_gofast,
-            distance = 1.5,
-            onSelect = function()
-                local minPolice = lib.callback.await('gofast:getMinPolice', false)
-
-                if type(minPolice) ~= 'number' then
-                    lib.notify({
-                        title = T.gofast_title,
-                        description = T.error_police_check or 'Error checking police count.',
-                        type = 'error',
-                        duration = 5000,
-                        position = Config.OxNotifyPosition
-                    })
-                    return
-                end
-
-                if minPolice >= Config.MinPolice then
-                    checkDrugsAndShowMenu()
-                else
-                    lib.notify({
-                        title = T.unknown_title,
-                        description = T.come_back_later,
-                        type = 'error',
-                        duration = 5000,
-                        position = Config.OxNotifyPosition
-                    })
-                end
-            end
+            type = 'number',
+            label = T.quantity_label,
+            description = minAmount and string.format(T.min_max_quantity_description, minAmount, maxAmount)
+                            or string.format(T.max_quantity_description, maxAmount),
+            required = true,
+            min = minAmount or 1,
+            max = maxAmount
         }
     })
 end
 
-local function CompleteGoFast(drugType, amount)
+function manageGoFastPed()
+    local pedCreated = false
+    while true do
+        local sleep = 1000
+        local playerCoords = GetEntityCoords(PlayerPedId())
+        local dist = #(playerCoords - vector3(Config.PedLocation.x, Config.PedLocation.y, Config.PedLocation.z))
 
-    if DoesEntityExist(missionVehicle) then
-        Wait(5000)
-        DeleteEntity(missionVehicle)
-        -- remove keys (still working on my keys system)
+        if dist < 10.0 and not pedCreated then
+            waitForModel(Config.PedModel)
+            gofastPed = CreatePed(4, Config.PedModel, Config.PedLocation.x, Config.PedLocation.y, Config.PedLocation.z - 1, Config.PedLocation.w, false, true)
+            FreezeEntityPosition(gofastPed, true)
+            SetEntityInvincible(gofastPed, true)
+            SetBlockingOfNonTemporaryEvents(gofastPed, true)
+            pedCreated = true
+
+            exports.ox_target:addLocalEntity(gofastPed, {
+                {
+                    name = 'start_gofast', icon = 'fas fa-car', label = T.start_gofast, distance = 1.5,
+                    onSelect = function()
+                        local minPolice = lib.callback.await('gofast:getMinPolice', false)
+                        if type(minPolice) ~= 'number' then
+                            return notify(T.gofast_title, T.error_police_check or 'Error checking police count.', 'error')
+                        end
+                        if minPolice >= Config.MinPolice then
+                            checkDrugsAndShowMenu()
+                        else
+                            notify(T.unknown_title, T.come_back_later, 'error')
+                        end
+                    end
+                }
+            })
+
+        elseif dist >= 10.0 and pedCreated then
+            DeleteEntity(gofastPed)
+            gofastPed = nil
+            pedCreated = false
+        end
+
+        Wait(sleep)
     end
+end
 
-    TriggerServerEvent('gofast:completeMission', drugType.name, amount)
-    isOnMission = false
-    missionVehicle = nil
+function StartGoFastMission(drugType, amount, plate)
+    local model = GetHashKey(Config.VehicleModels[math.random(#Config.VehicleModels)])
+    waitForModel(model)
+    local coords = Config.VehicleSpawnPoint
+    missionVehicle = CreateVehicle(model, coords.x, coords.y, coords.z, coords.w, true, false)
+    SetEntityAsMissionEntity(missionVehicle, true, true)
+    SetVehicleNumberPlateText(missionVehicle, plate)
+    SetNewWaypoint(coords.x, coords.y)
+    notify(T.gofast_title, T.vehicle_ready, 'info')
+
+    CreateThread(function()
+        while not IsPedInVehicle(PlayerPedId(), missionVehicle, false) do Wait(1000) end
+        StartGoFastTimer(drugType, amount)
+    end)
 end
 
 function StartGoFastTimer(drugType, amount)
-    lib.notify({
-        title = T.gofast_title,
-        description = T.move_quickly,
-        type = 'info',
-        duration = 5000,
-        position = Config.OxNotifyPosition
-    })
+    notify(T.gofast_title, T.move_quickly, 'info')
+    Wait(math.random(Config.TimerBeforeAlert.min, Config.TimerBeforeAlert.max) * 1000)
 
-    local waitTime = math.random(Config.TimerBeforeAlert.min, Config.TimerBeforeAlert.max)
-    Wait(waitTime * 1000)
-
-    -- add my dispatch here (still ongoing work)
-
-    local policeAlertDuration = math.random(Config.PoliceAlertDuration.min, Config.PoliceAlertDuration.max)
+    local alertDuration = math.random(Config.PoliceAlertDuration.min, Config.PoliceAlertDuration.max)
+    local point = Config.DeliveryPoints[math.random(#Config.DeliveryPoints)]
 
     CreateThread(function()
-        local endTime = GetGameTimer() + (policeAlertDuration * 1000)
+        local endTime = GetGameTimer() + (alertDuration * 1000)
         while GetGameTimer() < endTime do
+            TriggerServerEvent('gofast:updatePoliceBlip', GetEntityCoords(PlayerPedId()))
             Wait(Config.PoliceUpdateInterval * 1000)
-            local playerCoords = GetEntityCoords(PlayerPedId())
-            TriggerServerEvent('gofast:updatePoliceBlip', playerCoords)
         end
-
         TriggerServerEvent('gofast:signalLost')
-        lib.notify({
-            title = T.gofast_title,
-            description = T.signal_jammed,
-            type = 'success',
-            duration = 5000,
-            position = Config.OxNotifyPosition
-        })
+        notify(T.gofast_title, T.signal_jammed, 'success')
 
-        local deliveryPoint = Config.DeliveryPoints[math.random(#Config.DeliveryPoints)]
-        deliveryBlip = AddBlipForCoord(deliveryPoint.x, deliveryPoint.y, deliveryPoint.z)
+        deliveryBlip = AddBlipForCoord(point.x, point.y, point.z)
         SetBlipRoute(deliveryBlip, true)
 
         CreateThread(function()
             while true do
-                Wait(1000)
-                local playerCoords = GetEntityCoords(PlayerPedId())
-                local distance = #(playerCoords - vector3(deliveryPoint.x, deliveryPoint.y, deliveryPoint.z))
-                if distance < 5.0 then
-                    CompleteGoFast(drugType, amount)
+                if #(GetEntityCoords(PlayerPedId()) - point) < 5.0 then
                     RemoveBlip(deliveryBlip)
+                    TriggerServerEvent('gofast:completeMission', drugType.name, amount)
+                    DeleteEntity(missionVehicle)
+                    deliveryBlip, missionVehicle, isOnMission = nil, nil, false
                     break
                 end
+                Wait(1000)
             end
         end)
     end)
 end
 
-function StartGoFastMission(drugType, amount, plate)
-    local model = GetHashKey(Config.VehicleModels[math.random(#Config.VehicleModels)])
-    RequestModel(model)
-    while not HasModelLoaded(model) do Wait(0) end
-
-    local vehicleCoords = Config.VehicleSpawnPoint
-    missionVehicle = CreateVehicle(model, vehicleCoords.x, vehicleCoords.y, vehicleCoords.z, vehicleCoords.w, true, false)
-    SetEntityAsMissionEntity(missionVehicle, true, true)
-    SetVehicleNumberPlateText(missionVehicle, plate)
-    SetNewWaypoint(vehicleCoords.x, vehicleCoords.y)
-
-    lib.notify({
-        title = T.gofast_title,
-        description = T.vehicle_ready,
-        type = 'info',
-        duration = 5000,
-        position = Config.OxNotifyPosition
-    })
-
-    CreateThread(function()
-        while true do
-            Wait(1000)
-            if IsPedInVehicle(PlayerPedId(), missionVehicle, false) then
-                StartGoFastTimer(drugType, amount)
-                break
-            end
-        end
-    end)
-end
-
-function showDrugMenu(availableDrugs)
-    if #availableDrugs == 0 then
-        lib.notify({
-            title = T.gofast_title,
-            description = T.no_drugs_available,
-            type = 'error',
-            duration = 5000,
-            position = Config.OxNotifyPosition
-        })
-        return
-    end
-
-    local options = {}
-    for _, drug in ipairs(availableDrugs) do
-        table.insert(options, {
-            title = drug.label or T.unknown_drug,
-            description = string.format('%s, %s, %s',
-                string.format(T.reward_format, drug.rewardPerUnit),
-                string.format(T.max_amount_format, drug.maxAmount),
-                string.format(T.available_amount_format, drug.playerAmount)),
+function showDrugMenu(drugs)
+    if #drugs == 0 then return notify(T.gofast_title, T.no_drugs_available, 'error') end
+    local opts = {}
+    for _, d in ipairs(drugs) do
+        table.insert(opts, {
+            title = d.label or T.unknown_drug,
+            description = string.format('%s, %s, %s', T.reward_format:format(d.rewardPerUnit), T.max_amount_format:format(d.maxAmount), T.available_amount_format:format(d.playerAmount)),
             icon = 'cannabis',
             onSelect = function()
-                local maxAmount = math.min(drug.maxAmount, drug.playerAmount)
-                local input = lib.inputDialog(string.format('%s %s', T.quantity_label, drug.label), {
-                    {
-                        type = 'number',
-                        label = T.quantity_label,
-                        description = string.format(T.max_quantity_description, maxAmount),
-                        required = true,
-                        min = 1,
-                        max = maxAmount
-                    }
-                })
-
+                local amt = math.min(d.maxAmount, d.playerAmount)
+                local input = showInputDialog(d, amt)
                 if input and input[1] then
-                    local amount = math.floor(input[1])
-                    if amount > 0 and amount <= maxAmount then
-                        TriggerServerEvent('gofast:startMission', drug.name, amount)
+                    local val = math.floor(input[1])
+                    if val > 0 and val <= amt then
+                        TriggerServerEvent('gofast:startMission', d.name, val)
                     else
-                        lib.notify({
-                            title = T.gofast_title,
-                            description = T.invalid_quantity,
-                            type = 'error',
-                            duration = 5000,
-                            position = Config.OxNotifyPosition
-                        })
+                        notify(T.gofast_title, T.invalid_quantity, 'error')
                     end
                 end
             end
         })
     end
-
-    registerDrugMenu(options)
+    lib.registerContext({id = 'gofast_drug_selection', title = T.drug_selection_title, options = opts})
     lib.showContext('gofast_drug_selection')
 end
 
-function registerDrugMenu(options)
-    lib.registerContext({
-        id = 'gofast_drug_selection',
-        title = T.drug_selection_title,
-        options = options
-    })
-end
-
 function checkDrugsAndShowMenu()
-    if isOnMission then
-        lib.notify({
-            title = T.gofast_title,
-            description = T.mission_in_progress,
-            type = 'error',
-            duration = 5000,
-            position = Config.OxNotifyPosition
-        })
-        return
-    end
-
-    local availableDrugs = lib.callback.await('gofast:getDrugList', false)
-
-    if not availableDrugs or #availableDrugs == 0 then
-        lib.notify({
-            title = T.gofast_title,
-            description = T.no_drugs_available,
-            type = 'error',
-            duration = 5000,
-            position = Config.OxNotifyPosition
-        })
-        return
-    end
-
-    local options = {}
-
-    for _, drug in ipairs(availableDrugs) do
-        table.insert(options, {
-            title = drug.label or T.unknown_drug,
-            description = string.format(T.reward_min_max_available_format,
-                drug.rewardPerUnit, drug.minAmount, drug.maxAmount, drug.playerAmount),
-            icon = 'cannabis',
-            onSelect = function()
-                local maxAmount = math.min(drug.maxAmount, drug.playerAmount)
-                local input = lib.inputDialog(string.format('%s %s', T.quantity_label, drug.label), {
-                    {
-                        type = 'number',
-                        label = T.quantity_label,
-                        description = string.format(T.min_max_quantity_description, drug.minAmount, maxAmount),
-                        required = true,
-                        min = drug.minAmount,
-                        max = maxAmount
-                    }
-                })
-
-                if input and input[1] then
-                    local amount = math.floor(input[1])
-                    if amount >= drug.minAmount and amount <= maxAmount then
-                        TriggerServerEvent('gofast:startMission', drug.name, amount)
-                    else
-                        lib.notify({
-                            title = T.gofast_title,
-                            description = string.format(T.invalid_quantity_range, drug.minAmount, maxAmount),
-                            type = 'error',
-                            duration = 5000,
-                            position = Config.OxNotifyPosition
-                        })
-                    end
-                end
-            end
-        })
-    end
-
-    registerDrugMenu(options)
-    showDrugMenu(availableDrugs)
+    if isOnMission then return notify(T.gofast_title, T.mission_in_progress, 'error') end
+    local drugs = lib.callback.await('gofast:getDrugList', false)
+    if not drugs or #drugs == 0 then return notify(T.gofast_title, T.no_drugs_available, 'error') end
+    showDrugMenu(drugs)
 end
 
-RegisterNetEvent('gofast:startMission')
-AddEventHandler('gofast:startMission', function(drugType, amount, plate)
+RegisterNetEvent('gofast:startMission', function(drugType, amount, plate)
     if not isOnMission then
         isOnMission = true
         StartGoFastMission(drugType, amount, plate)
     end
 end)
 
-RegisterNetEvent('gofast:signalLost')
-AddEventHandler('gofast:signalLost', function()
-    lib.notify({
-        title = T.gofast_title,
-        description = T.police_lost_trace,
-        type = 'success'
-    })
+RegisterNetEvent('gofast:signalLost', function()
+    notify(T.gofast_title, T.police_lost_trace, 'success')
 end)
 
-RegisterNetEvent('gofast:showPoliceBlip')
-AddEventHandler('gofast:showPoliceBlip', function(coords)
+RegisterNetEvent('gofast:showPoliceBlip', function(coords)
     local blip = AddBlipForCoord(coords.x, coords.y, coords.z)
     SetBlipSprite(blip, 161)
     SetBlipColour(blip, 1)
@@ -309,12 +171,8 @@ AddEventHandler('gofast:showPoliceBlip', function(coords)
     AddTextComponentString(T.gofast_suspect)
     EndTextCommandSetBlipName(blip)
     PlaySound(-1, "Lose_1st", "GTAO_FM_Events_Soundset", 0, 0, 1)
-
     Wait(Config.PoliceBlipDuration * 1000)
     RemoveBlip(blip)
 end)
 
--- Init
-CreateThread(function()
-    CreateGoFastPed()
-end)
+CreateThread(manageGoFastPed)

@@ -1,7 +1,7 @@
 fx_version 'cerulean'
 game 'gta5'
 
-author 'Arkeo'
+author 'ArkeologeN'
 
 shared_scripts {
     '@ox_lib/init.lua',
