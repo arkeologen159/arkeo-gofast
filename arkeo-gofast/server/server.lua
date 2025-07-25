@@ -52,7 +52,7 @@ RegisterNetEvent('gofast:startMission', function(drugName, amount)
         return notify(src, 'error', T.global_gofast_limit_reached)
     end
 
-    if table.count(activeMissions) >= 2 then
+    if #activeMissions >= 2 then
         return notify(src, 'error', T.max_gofast_active)
     end
 
